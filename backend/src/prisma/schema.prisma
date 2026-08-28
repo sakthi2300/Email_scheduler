@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ────────────────────────────────────────────────────────────
+// User — created on first Google OAuth sign-in
+// ────────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(uuid())
+  googleId     String?  @unique
+  email        String   @unique
+  passwordHash String?
+  name         String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+
+  senders Sender[]
+  batches EmailBatch[]
+  slack   SlackIntegration?
+}
+
+// ────────────────────────────────────────────────────────────
+// Sender — an Ethereal SMTP account the user can send from
+// ────────────────────────────────────────────────────────────
+model Sender {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  smtpUser    String
+  smtpPass    String   // encrypted at rest
+  hourlyLimit Int      @default(200)
+  createdAt   DateTime @default(now())
+
+  batches EmailBatch[]
+  emails  Email[]
+
+  @@index([userId])
+}
+
+// ────────────────────────────────────────────────────────────
+// EmailBatch — a single "compose & schedule" action
+// ────────────────────────────────────────────────────────────
+model EmailBatch {
+  id                   String   @id @default(uuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id])
+  senderId             String
+  sender               Sender   @relation(fields: [senderId], references: [id])
+  subject              String
+  body                 String   @db.Text
+  startTime            DateTime
+  delayBetweenEmailsMs Int
+  hourlyLimit          Int
+  createdAt            DateTime @default(now())
+
+  emails Email[]
+
+  @@index([userId])
+  @@index([senderId])
+}
+
+// ────────────────────────────────────────────────────────────
+// Email — one per recipient in a batch
+// ────────────────────────────────────────────────────────────
+model Email {
+  id             String      @id @default(uuid())
+  batchId        String
+  batch          EmailBatch  @relation(fields: [batchId], references: [id])
+  senderId       String
+  sender         Sender      @relation(fields: [senderId], references: [id])
+  recipientEmail String
+  subject        String
+  body           String      @db.Text
+  jobId          String      @unique // deterministic hash(batchId + recipientEmail)
+  status         EmailStatus @default(scheduled)
+  scheduledTime  DateTime
+  sentTime       DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  attempts EmailAttempt[]
+
+  @@index([status])
+  @@index([batchId])
+  @@index([scheduledTime])
+  @@index([senderId])
+}
+
+enum EmailStatus {
+  scheduled
+  processing
+  delayed
+  sent
+  failed
+}
+
+// ────────────────────────────────────────────────────────────
+// EmailAttempt — audit trail per send attempt
+// ────────────────────────────────────────────────────────────
+model EmailAttempt {
+  id            String        @id @default(uuid())
+  emailId       String
+  email         Email         @relation(fields: [emailId], references: [id])
+  attemptNumber Int
+  status        AttemptStatus
+  errorMessage  String?       @db.Text
+  attemptedAt   DateTime      @default(now())
+
+  @@index([emailId])
+}
+
+enum AttemptStatus {
+  failed
+  success
+}
+
+// ────────────────────────────────────────────────────────────
+// SlackIntegration — one per user, stores OAuth token
+// ────────────────────────────────────────────────────────────
+model SlackIntegration {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+  teamId      String
+  accessToken String   // encrypted at rest
+  webhookUrl  String
+  connectedAt DateTime @default(now())
+}
+
+// ────────────────────────────────────────────────────────────
+// RateLimitWindow — mirrors Redis counters for audit/fallback
+// ────────────────────────────────────────────────────────────
+model RateLimitWindow {
+  id         String   @id @default(uuid())
+  senderId   String
+  hourWindow DateTime
+  count      Int      @default(0)
+
+  @@unique([senderId, hourWindow])
+}
